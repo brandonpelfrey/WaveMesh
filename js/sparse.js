@@ -46,8 +46,26 @@ function SparseMatrix(M,N) {
 		return 0.0;
 	};
 
+	this.normalizeRows = function() {
+		// see if there is an entry already
+		var i,k,data, sum;
+		for(i=0;i<this.M;++i) {
+			data = this.rowData[i];
+			sum = 0.0;
+			for(k=0;k<data.length;++k) {
+				sum += Math.abs(data[k][1]);
+			}	
+			if(sum != 0.0) {
+				sum = 1.0 / sum;
+				for(k=0;k<data.length;++k) {
+					data[k][1] *= sum;
+				}	
+			}
+		}
+	};
+
 	this.getNumeric = function() {
-		// This is slow and dumb, but makes this really nice for interacting
+		// This is slow and dumb, but makes this really nice for interacting with numericjs
 		var rows = [], cols = [], elements = [], i, j, data;
 
 		for(i=0;i<this.M;++i) {
@@ -60,4 +78,48 @@ function SparseMatrix(M,N) {
 		}
 		return numeric.ccsScatter([rows, cols, elements]);
 	};
+
+	this.multiply = function(v) {
+		var result = new Array(this.M), i, j, data, sum, L;
+		for(i=0;i<this.M;++i) {
+			data = this.rowData[i];
+			sum = 0.0;
+			L = data.length;
+			for(j=0;j<L;++j) {
+				sum += v[data[j][0]] * data[j][1];
+			}
+			result[i] = sum;
+		}
+		return result;
+	}
+
+	// in-place
+	this.scale = function(s) {
+		var i,j;
+		for(i=0;i<this.M;++i) {
+			data = this.rowData[i];
+			for(j=0;j<data.length;++j) {
+				data[j][1] *= s;
+			}
+		}
+	}
+
+	this.add = function(B) {
+		var result = new SparseMatrix(this.M, this.N), i, j;
+		// Add A
+		for(i=0;i<this.M;++i) {
+			data = this.rowData[i];
+			for(j=0;j<data.length;++j) {
+				result.accumulate(i, data[j][0], data[j][1]);
+			}
+		}
+		// Add B
+		for(i=0;i<this.M;++i) {
+			data = B.rowData[i];
+			for(j=0;j<data.length;++j) {
+				result.accumulate(i, data[j][0], data[j][1]);
+			}
+		}
+		return result;
+	}
 }

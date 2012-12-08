@@ -2,13 +2,15 @@
 <head>
 	<title>Mesh Waves</title>
 	<script type="text/javascript" src="js/three.min.js"></script>
-	<script type="text/javascript" src="js/numeric.min.js"></script>
+    <script type="text/javascript" src="js/TrackballControls.js"></script>
+	<!--<script type="text/javascript" src="js/numeric.min.js"></script>-->
 	<script type="text/javascript" src="js/sparse.js"></script>
     <script type="text/javascript" src="js/dat.gui.min.js"></script>
     <script type="text/javascript" src="js/stats.min.js"></script>
     <style type="text/css">
     body {
         overflow: hidden;
+        background-color: #bbb;
     };
     </style>
 </head>
@@ -17,7 +19,7 @@
 <script>
 
     var camera, scene, renderer, stats;
-    var geometry, material, mesh, colorScale=1.0, faceAreas;
+    var geometry, material, mesh, faceAreas;
 
     var simContext;
     var laplacian, identity;
@@ -75,11 +77,10 @@
     	var nFaces = geometry.faces.length, nVertices = geometry.vertices.length, i;
 
     	// Build the identity operator
-		var identityBuilder = new SparseMatrix(nFaces, nFaces);
+		var identity = new SparseMatrix(nFaces, nFaces);
 		for(i=0; i<nFaces; ++i) {
-			identityBuilder.accumulate(i,i,1.0);
+			identity.accumulate(i,i,1.0);
 		}
-		identity = identityBuilder.getNumeric();
 
         // Build face area array (assumed planar)
         faceAreas = new Array(nFaces);
@@ -121,7 +122,7 @@
 			}
 
             if(edgeMap.store[edge].length != 2) {
-                // If this is a boundary edge, then there is no flux across.
+                // If this is a boundary edge, then there is no flux across. (von Neumann BCs)
                 continue;
             }
 
@@ -137,68 +138,84 @@
 			
             var ci = circumcenter(verts[faces[i].a], verts[faces[i].b], verts[faces[i].c]);
             var cj = circumcenter(verts[faces[j].a], verts[faces[j].b], verts[faces[j].c]);
-
-			r = midedge.distanceTo(ci) + midedge.distanceTo(cj);
+            r = midedge.distanceTo(ci) + midedge.distanceTo(cj);
 			r = ei.subSelf(ej).length() / r;
-
+            
 			L.accumulate(i,i,-r);
 			L.accumulate(j,j,-r);
 			L.accumulate(i,j, r);
 			L.accumulate(j,i, r);
 		}
 
-		laplacian = laplacian.getNumeric();
-
         // Construct the solution state vectors
-        simContext.solution = new SparseMatrix(nFaces, 1);
-        simContext.oldSolution = new SparseMatrix(nFaces, 1);
+        simContext.solution = new Array(nFaces);
+        simContext.oldSolution = new Array(nFaces);
 
-        // Start a bump at one of the sites. Everything else 0
+        // Start a bump on one side. 
         for(i=0; i<nFaces; ++i) {
             var fc = faces[i].centroid.clone();
-            var r = 2*Math.exp(-25*fc.distanceToSquared(new THREE.Vector3(1,0,0)));
-            simContext.solution.set(i,0,r);
-            simContext.oldSolution.set(i,0,r);
+            var r = 2*Math.exp(-simContext.bumpSharpness*fc.distanceToSquared(new THREE.Vector3(1,0,0)));
+            simContext.solution[i] = r;
+            simContext.oldSolution[i] = r;
         }
 
-        simContext.solution = simContext.solution.getNumeric();
-        simContext.oldSolution = simContext.oldSolution.getNumeric();
+        identity.scale(2.0);
+        laplacian.scale(simContext.timeStepSize * simContext.timeStepSize * simContext.omega);
 
-        // Don't know of a sparse matrix-scalar multiplication in numericJS...
-        for(i=0;i<identity[2].length;++i)
-            identity[2][i] *= 2.0;
+        simContext.M = laplacian.add(identity);
+    }
 
-        for(i=0;i<laplacian[2].length;++i)
-            laplacian[2][i] *= simContext.timeStepSize * simContext.timeStepSize * simContext.omega;
-
-        simContext.M = numeric.ccsadd(laplacian, identity);
+    // return v1*alpha + v2*beta
+    function linearVectorCombination(v1, alpha, v2, beta) {
+        var result = new Array(v1.length), i;
+        for(i=0; i<v1.length; ++i) {
+            result[i] = v1[i] * alpha + v2[i] * beta;
+        }
+        return result;
     }
 
     function simUpdate() {
-        var nextState = numeric.ccsDot(simContext.M, simContext.solution);
-        nextState = numeric.ccssub(nextState, simContext.oldSolution);
+        var nextState = simContext.M.multiply(simContext.solution);
+        nextState = linearVectorCombination(nextState, 1, simContext.oldSolution, -1);
         simContext.oldSolution = simContext.solution;
         simContext.solution = nextState;
+    }
+
+    function addAxes() {
+        var size = 2;
+        var lineMaterial = new THREE.LineBasicMaterial({ color: 0x222222 });
+
+        var xgeom = new THREE.Geometry(); 
+        xgeom.vertices.push(new THREE.Vector3(-size,0,0));
+        xgeom.vertices.push(new THREE.Vector3(size,0,0));
+        scene.add( new THREE.Line(xgeom, lineMaterial));
+
+        var zgeom = new THREE.Geometry(); 
+        zgeom.vertices.push(new THREE.Vector3(0,0,-size));
+        zgeom.vertices.push(new THREE.Vector3(0,0,size));
+        scene.add( new THREE.Line(zgeom, lineMaterial));
     }
 
     function init() {
 
         // three.js
-        camera = new THREE.PerspectiveCamera( 75, window.innerWidth / window.innerHeight, .1, 100 );
-        camera.position.z = 1.8;
+        camera = new THREE.PerspectiveCamera( 45, window.innerWidth / window.innerHeight, .1, 100 );
+        camera.position = new THREE.Vector3(1.8,1.8,1.8);
+        camera.lookAt(new THREE.Vector3(0,0,0));
+
 
         scene = new THREE.Scene();
 
-        // geometry = new THREE.TorusKnotGeometry(200,20,400,32,3,-2);
         geometry.computeFaceNormals();
         geometry.dynamic = true;
 
-        //material = new THREE.MeshBasicMaterial( { color: 0x222222, wireframe: false } );
         material = new THREE.MeshBasicMaterial({color:0xffffff});
         material.vertexColors = THREE.FaceColors;
 
         mesh = new THREE.Mesh( geometry, material );
+        mesh.rotation.y = 1;
         scene.add( mesh );
+        addAxes();
         renderer = new THREE.WebGLRenderer();
 
         renderer.setSize( window.innerWidth, window.innerHeight );
@@ -207,17 +224,18 @@
         // Simulation 
         simContext = {
             timeStepSize: .5,
-            omega: 1
+            omega: 1,
+            bumpSharpness: 100,
+            colorScale: 1
         };
         buildWaveOperators();
 
         // GUI
         var gui = new dat.GUI();
-        gui.add(camera.position, 'z', .1, 10);
-        gui.add(mesh.rotation, 'y', 0.0, Math.PI*2);
         gui.add(simContext, 'timeStepSize', 0.01, 1.0).onFinishChange(buildWaveOperators);
         gui.add(simContext, 'omega', 0.0, 1.0).onFinishChange(buildWaveOperators);
-        gui.add(window,'colorScale', 1.0, 20.0);
+        gui.add(simContext, 'bumpSharpness', 0.0, 400.0).onFinishChange(buildWaveOperators);
+        gui.add(simContext, 'colorScale', 1.0, 20.0);
 
         // stats bar
         stats = new Stats();
@@ -228,44 +246,36 @@
     }
 
     function animate() {
-        //requestAnimationFrame( animate );
+        var time = new Date().getTime() * .001 * .2;
+        camera.position = new THREE.Vector3(Math.cos(time), .5, Math.sin(time)).multiplyScalar(3);
+        camera.lookAt(new THREE.Vector3(0,0,0));
+        camera.updateMatrix();
+        camera.updateProjectionMatrix();
+
         stats.begin();
 
         // Update simulation
         simUpdate();
         
         // Fill in the new face colors
-        full = numeric.ccsFull(simContext.solution);
+        full = simContext.solution;
         var col;
         for(var i=0; i<geometry.faces.length; ++i) {
             col = full[i];
-            if(col === undefined) { col = 0.0; }
-            else { col = full[i][0]; }
-
-            col = col * colorScale ;/// faceAreas[i];
+            col = col * simContext.colorScale;
             col = col + .25;
             if(col<0.0) col = 0.0;
             if(col>1.0) col = 1.0;
-            /*
-            col = col | 0;
-            col = (col<<16) | (col<<8) | col;
-            if(i<3) {
-                console.log(col);
-            }
-            */
-            
 
             col = (col*255) & 0xff;
             col = col + (col<<8) + (col<<16);
             geometry.faces[i].color = new THREE.Color(col);
         }
-        geometry.__dirtyColors = true;
         geometry.colorsNeedUpdate = true;
 
         renderer.render( scene, camera );
 
         stats.end();
-        
     }
 
 </script>
