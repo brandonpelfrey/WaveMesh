@@ -22,7 +22,12 @@
     var geometry, material, mesh, faceAreas;
 
     var simContext;
-    var laplacian, identity;
+    var laplacian, identity, averagingOperator;
+
+    var mouse2D = new THREE.Vector3( 0, 10000, 0.5 );
+    var ray, projector, mouse3D;
+
+    var lastSelectedFace = -1;
 
     new THREE.JSONLoader().load( "models/sphere2.js", function( geometry ) { 
         window.geometry = geometry;
@@ -93,7 +98,12 @@
             faceAreas[i] = e0.crossSelf(e1).length() * .5;
         }
 
-		// Build the Laplacian for this mesh
+        averagingOperator = new SparseMatrix(nFaces, nFaces);
+        for(i=0; i<nFaces; ++i) {
+            averagingOperator.accumulate(i,i,1.0);
+        }
+
+		// Build the Laplacian and averaging operators for this mesh
 
 		// 1. Get a map of edge -> faces sharing this edge
 		// This is bad style using an object as a hash map, but it's the only native thing we have (read: speed)
@@ -145,7 +155,12 @@
 			L.accumulate(j,j,-r);
 			L.accumulate(i,j, r);
 			L.accumulate(j,i, r);
+
+            averagingOperator.accumulate(i,j,1);
+            averagingOperator.accumulate(j,i,1);
 		}
+
+        averagingOperator.normalizeRows();
 
         // Construct the solution state vectors
         simContext.solution = new Array(nFaces);
@@ -154,7 +169,8 @@
         // Start a bump on one side. 
         for(i=0; i<nFaces; ++i) {
             var fc = faces[i].centroid.clone();
-            var r = 2*Math.exp(-simContext.bumpSharpness*fc.distanceToSquared(new THREE.Vector3(1,0,0)));
+            //var r = 2*Math.exp(-simContext.bumpSharpness*fc.distanceToSquared(new THREE.Vector3(1,0,0)));
+            r = 0;
             simContext.solution[i] = r;
             simContext.oldSolution[i] = r;
         }
@@ -203,6 +219,9 @@
         camera.position = new THREE.Vector3(1.8,1.8,1.8);
         camera.lookAt(new THREE.Vector3(0,0,0));
 
+        ray = new THREE.Ray( camera.position, null );
+        projector = new THREE.Projector();
+        document.addEventListener( 'mousemove', onDocumentMouseMove, false );
 
         scene = new THREE.Scene();
 
@@ -251,6 +270,7 @@
         camera.lookAt(new THREE.Vector3(0,0,0));
         camera.updateMatrix();
         camera.updateProjectionMatrix();
+        ray = new THREE.Ray( camera.position, null );
 
         stats.begin();
 
@@ -276,6 +296,48 @@
         renderer.render( scene, camera );
 
         stats.end();
+    }
+
+    function onDocumentMouseMove( event ) {
+        event.preventDefault();
+
+        if(event.which != 1) return;
+
+        mouse2D.x = ( event.clientX / window.innerWidth ) * 2 - 1;
+        mouse2D.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+
+        mouse3D = projector.unprojectVector( mouse2D.clone(), camera );
+        ray.direction = mouse3D.subSelf( camera.position ).normalize();
+
+        var intersects = ray.intersectObjects( scene.children ), faceIndex, i;
+
+        if ( intersects.length > 0 ) {
+            faceIndex = intersects[0].faceIndex;
+
+            // We don't want to continuously add to the same face
+            if(faceIndex === lastSelectedFace) {
+                return;
+            }
+
+            if(faceIndex>0) {
+
+                var nFaces = geometry.faces.length;
+                var pulse = new Array(nFaces)
+                for(i=0;i<nFaces;++i) {
+                    pulse[i] = 0.0;
+                }
+                pulse[faceIndex] = 1;
+
+                // Smooth this out a couple of times. (This is stupid and slow, but it works.)
+                for(i=0; i<3; ++i)
+                    pulse = averagingOperator.multiply(pulse);
+
+                simContext.solution = linearVectorCombination(pulse, 1, simContext.solution, 1);
+                simContext.oldSolution = linearVectorCombination(pulse, 1, simContext.oldSolution, 1);
+
+                lastSelectedFace = faceIndex;
+            }
+        }
     }
 
 </script>
