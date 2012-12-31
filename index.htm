@@ -1,344 +1,311 @@
 <html>
 <head>
-	<title>Mesh Waves</title>
-	<script type="text/javascript" src="js/three.min.js"></script>
-    <script type="text/javascript" src="js/TrackballControls.js"></script>
-	<!--<script type="text/javascript" src="js/numeric.min.js"></script>-->
-	<script type="text/javascript" src="js/sparse.js"></script>
-    <script type="text/javascript" src="js/dat.gui.min.js"></script>
-    <script type="text/javascript" src="js/stats.min.js"></script>
-    <style type="text/css">
-    body {
-        overflow: hidden;
-        background-color: #bbb;
-    };
-    </style>
+<title>Mesh Waves</title>
+<script type="text/javascript" src="js/three.min.js"></script>
+<script type="text/javascript" src="js/TrackballControls.js"></script>
+<!--<script type="text/javascript" src="js/numeric.min.js"></script>-->
+<script type="text/javascript" src="js/sparse.js"></script>
+<!--<script type="text/javascript" src="js/dat.gui.min.js"></script>-->
+<script type="text/javascript" src="js/stats.min.js"></script>
+<style type="text/css">
+body {
+overflow: hidden;
+					background-color: #bbb;
+};
+</style>
 </head>
 <body>
 
 <script>
 
-    var camera, scene, renderer, stats;
-    var geometry, material, mesh, faceAreas;
+var camera, scene, renderer, stats, controls;
+var geometry, material, mesh, faceAreas;
 
-    var simContext;
-    var laplacian, identity, averagingOperator;
+var simContext;
+var laplacian, identity, averagingOperator;
 
-    var mouse2D = new THREE.Vector3( 0, 10000, 0.5 );
-    var ray, projector, mouse3D;
+var mouse2D = new THREE.Vector3( 0, 10000, 0.5 );
+var ray, projector, mouse3D;
 
-    var lastSelectedFace = -1;
+var lastSelectedFace = -1;
 
-    new THREE.JSONLoader().load( "models/sphere2.js", function( geometry ) { 
-        window.geometry = geometry;
-        init();
+new THREE.JSONLoader().load( "models/sphere2.js", function( geometry ) { 
+		window.geometry = geometry;
+		init();
 
-        setInterval(function() {
-            animate();
-        }, 1000 / 60.0);
-    } );
+		setInterval(function() {
+			animate();
+			}, 1000 / 60.0);
+		} );
 
-    function allFacesQuad() {
-    	for(var i=0; i<geometry.faces; ++i)
-    		if(!(geometry.faces[i] instanceof THREE.Face4))
-    			return false;
-    	return true;
-    }
+function allFacesQuad() {
+	for(var i=0; i<geometry.faces; ++i)
+		if(!(geometry.faces[i] instanceof THREE.Face4))
+			return false;
+	return true;
+}
 
-    function EdgeToFaceMap(N) {
-    	this.store = {}; //  backing hash table. bad practice...
-    	this.N = N; 
+/* Store a map. Keyed on edges, values are an array of faces sharing that edge. */ 
+function EdgeToFaceMap(N) {
+	this.store = {}; //  backing hash table. bad practice...
+	this.N = N; 
 
-    	// Take two vertices
-    	this.add = function(va, vb, face) {
-    		// insure that va<vb
-    		if(vb<va) {
-    			var _tmp = va;
-    			va = vb;
-    			vb = _tmp;
-    		}
-
-    		var idx = va+'-'+vb;//(this.N * va) + vb;
-    		var entry = {vi:va, vj:vb, face:face};
-
-    		if(this.store[idx] === undefined) {
-    			this.store[idx] = [entry];
-    		} else {
-    			this.store[idx].push(entry);
-    		}
-    	};
-    }
-
-    function circumcenter(A,B,C) {
-        var a = (new THREE.Vector3).sub(A,C);
-        var b = (new THREE.Vector3).sub(B,C);
-        var acb = (new THREE.Vector3).cross(a,b);
-
-        var num = b.clone().multiplyScalar(a.dot(a)).subSelf(a.clone().multiplyScalar(b.dot(b)));
-        return C.clone().addSelf(num.crossSelf(acb).multiplyScalar(.5/(acb.dot(acb))));
-    }
-
-    function buildWaveOperators() {
-    	var nFaces = geometry.faces.length, nVertices = geometry.vertices.length, i;
-
-    	// Build the identity operator
-		var identity = new SparseMatrix(nFaces, nFaces);
-		for(i=0; i<nFaces; ++i) {
-			identity.accumulate(i,i,1.0);
+	// Take two vertices
+	this.add = function(va, vb, face) {
+		// insure that va<vb
+		if(vb<va) {
+			var _tmp = va;
+			va = vb;
+			vb = _tmp;
 		}
 
-        // Build face area array (assumed planar)
-        faceAreas = new Array(nFaces);
-        for(i=0;i<nFaces;++i) {
-            var a = geometry.vertices[geometry.faces[i].a];
-            var b = geometry.vertices[geometry.faces[i].b];
-            var c = geometry.vertices[geometry.faces[i].c];
-            var e0 = a.clone().subSelf(b);
-            var e1 = a.clone().subSelf(c);
-            faceAreas[i] = e0.crossSelf(e1).length() * .5;
-        }
+		var idx = va+'-'+vb;//(this.N * va) + vb;
+		var entry = {vi:va, vj:vb, face:face};
 
-        averagingOperator = new SparseMatrix(nFaces, nFaces);
-        for(i=0; i<nFaces; ++i) {
-            averagingOperator.accumulate(i,i,1.0);
-        }
+		if(this.store[idx] === undefined) {
+			this.store[idx] = [entry];
+		} else {
+			this.store[idx].push(entry);
+		}
+	};
+}
 
-		// Build the Laplacian and averaging operators for this mesh
+/* Compute the circumcenter of a triangle. (Wikipedia) */
+function circumcenter(A,B,C) {
+	var a = (new THREE.Vector3).sub(A,C);
+	var b = (new THREE.Vector3).sub(B,C);
+	var acb = (new THREE.Vector3).cross(a,b);
 
-		// 1. Get a map of edge -> faces sharing this edge
-		// This is bad style using an object as a hash map, but it's the only native thing we have (read: speed)
-		var edgeMap = new EdgeToFaceMap(nVertices);
-		var face;
-		for(i=0; i<nFaces; ++i) {
-			face = geometry.faces[i];
-            if(face instanceof THREE.Face3) {
-    			edgeMap.add(face.a, face.b, i);
-    			edgeMap.add(face.b, face.c, i);
-    			edgeMap.add(face.c, face.a, i);
-            }
-            else if(face instanceof THREE.Face4) {
-                edgeMap.add(face.a, face.b, i);
-                edgeMap.add(face.b, face.c, i);
-                edgeMap.add(face.c, face.d, i);
-                edgeMap.add(face.d, face.a, i);
-            }
+	var num = b.clone().multiplyScalar(a.dot(a)).subSelf(a.clone().multiplyScalar(b.dot(b)));
+	return C.clone().addSelf(num.crossSelf(acb).multiplyScalar(.5/(acb.dot(acb))));
+}
+
+/* Construct the Laplacian for the current mesh */
+function buildWaveOperators() {
+	var nFaces = geometry.faces.length, nVertices = geometry.vertices.length, i;
+
+	// Build the identity operator
+	var identity = new SparseMatrix(nFaces, nFaces);
+	for(i=0; i<nFaces; ++i) {
+		identity.accumulate(i,i,1.0);
+	}
+
+	// Build face area array (assumed triangles)
+	faceAreas = new Array(nFaces);
+	for(i=0;i<nFaces;++i) {
+		var a = geometry.vertices[geometry.faces[i].a];
+		var b = geometry.vertices[geometry.faces[i].b];
+		var c = geometry.vertices[geometry.faces[i].c];
+		var e0 = a.clone().subSelf(b);
+		var e1 = a.clone().subSelf(c);
+		faceAreas[i] = e0.crossSelf(e1).length() * .5;
+	}
+
+	// Construct another operator that assigns to a vertex
+	// the average value of faces sharing that vertex
+	averagingOperator = new SparseMatrix(nFaces, nFaces);
+	for(i=0; i<nFaces; ++i) {
+		averagingOperator.accumulate(i,i,1.0);
+	}
+
+	// Build the Laplacian and averaging operators for this mesh
+
+	// 1. Get a map of edge -> faces sharing this edge
+	// This is bad style using an object as a hash map, but it's the only native thing we have (read: speed)
+	var edgeMap = new EdgeToFaceMap(nVertices);
+	var face;
+	for(i=0; i<nFaces; ++i) {
+		face = geometry.faces[i];
+		if(face instanceof THREE.Face3) {
+			edgeMap.add(face.a, face.b, i);
+			edgeMap.add(face.b, face.c, i);
+			edgeMap.add(face.c, face.a, i);
+		}
+		else if(face instanceof THREE.Face4) {
+			edgeMap.add(face.a, face.b, i);
+			edgeMap.add(face.b, face.c, i);
+			edgeMap.add(face.c, face.d, i);
+			edgeMap.add(face.d, face.a, i);
+		}
+	}
+
+	laplacian = new SparseMatrix(nFaces, nFaces);
+	var L = laplacian, ea, eb, C, verts = geometry.vertices, faces = geometry.faces, r, midedge;
+	for(edge in edgeMap.store) {
+		// Not "proper" but since this is usually internally stored as a hash
+		// it is the only way to get this kind of fast lookup that I'm aware of
+		if(!edgeMap.store.hasOwnProperty(edge)) {
+			continue;
 		}
 
-		laplacian = new SparseMatrix(nFaces, nFaces);
-		var L = laplacian, ea, eb, C, verts = geometry.vertices, faces = geometry.faces, r, midedge;
-		for(edge in edgeMap.store) {
-			if(!edgeMap.store.hasOwnProperty(edge)) {
-				continue;
-			}
-
-            if(edgeMap.store[edge].length != 2) {
-                // If this is a boundary edge, then there is no flux across. (von Neumann BCs)
-                continue;
-            }
-
-			entry = edgeMap.store[edge][0];
-            
-			ei = verts[entry.vi].clone();
-			ej = verts[entry.vj].clone();
-
-			i = edgeMap.store[edge][0].face;
-			j = edgeMap.store[edge][1].face;
-
-			midedge = ei.addSelf(ej).multiplyScalar(.5);
-			
-            var ci = circumcenter(verts[faces[i].a], verts[faces[i].b], verts[faces[i].c]);
-            var cj = circumcenter(verts[faces[j].a], verts[faces[j].b], verts[faces[j].c]);
-            r = midedge.distanceTo(ci) + midedge.distanceTo(cj);
-			r = ei.subSelf(ej).length() / r;
-            
-			L.accumulate(i,i,-r);
-			L.accumulate(j,j,-r);
-			L.accumulate(i,j, r);
-			L.accumulate(j,i, r);
-
-            averagingOperator.accumulate(i,j,1);
-            averagingOperator.accumulate(j,i,1);
+		if(edgeMap.store[edge].length != 2) {
+			// If this is a boundary edge, then there is no flux across. 
+			// (von Neumann Boundary Conditions)
+			continue;
 		}
 
-        averagingOperator.normalizeRows();
+		entry = edgeMap.store[edge][0];
 
-        // Construct the solution state vectors
-        simContext.solution = new Array(nFaces);
-        simContext.oldSolution = new Array(nFaces);
+		// Edge vertices
+		ei = verts[entry.vi].clone();
+		ej = verts[entry.vj].clone();
 
-        // Start a bump on one side. 
-        for(i=0; i<nFaces; ++i) {
-            var fc = faces[i].centroid.clone();
-            //var r = 2*Math.exp(-simContext.bumpSharpness*fc.distanceToSquared(new THREE.Vector3(1,0,0)));
-            r = 0;
-            simContext.solution[i] = r;
-            simContext.oldSolution[i] = r;
-        }
+		// Faces sharing this edge
+		i = edgeMap.store[edge][0].face;
+		j = edgeMap.store[edge][1].face;
 
-        identity.scale(2.0);
-        laplacian.scale(simContext.timeStepSize * simContext.timeStepSize * simContext.omega);
+		// Midpoint on this edge
+		midedge = ei.addSelf(ej).multiplyScalar(.5);
 
-        simContext.M = laplacian.add(identity);
-    }
+		// Compute relavent quantities for the laplacian here
+		var ci = circumcenter(verts[faces[i].a], verts[faces[i].b], verts[faces[i].c]);
+		var cj = circumcenter(verts[faces[j].a], verts[faces[j].b], verts[faces[j].c]);
+		r = midedge.distanceTo(ci) + midedge.distanceTo(cj);
+		r = ei.subSelf(ej).length() / r;
 
-    // return v1*alpha + v2*beta
-    function linearVectorCombination(v1, alpha, v2, beta) {
-        var result = new Array(v1.length), i;
-        for(i=0; i<v1.length; ++i) {
-            result[i] = v1[i] * alpha + v2[i] * beta;
-        }
-        return result;
-    }
+		// Because this is integrated over the face, we require a factor of inverse area
+		var ri = r / faceAreas[i];
+		var rj = r / faceAreas[j];
 
-    function simUpdate() {
-        var nextState = simContext.M.multiply(simContext.solution);
-        nextState = linearVectorCombination(nextState, 1, simContext.oldSolution, -1);
-        simContext.oldSolution = simContext.solution;
-        simContext.solution = nextState;
-    }
+		// Since we computed this for the pair, and the Laplacian is symmetric,
+		// accumulate these values for both faces
+		L.accumulate(i,i,-ri);
+		L.accumulate(j,j,-rj);
+		L.accumulate(i,j, ri);
+		L.accumulate(j,i, rj);
 
-    function addAxes() {
-        var size = 2;
-        var lineMaterial = new THREE.LineBasicMaterial({ color: 0x222222 });
+		averagingOperator.accumulate(i,j,1);
+		averagingOperator.accumulate(j,i,1);
+	}
 
-        var xgeom = new THREE.Geometry(); 
-        xgeom.vertices.push(new THREE.Vector3(-size,0,0));
-        xgeom.vertices.push(new THREE.Vector3(size,0,0));
-        scene.add( new THREE.Line(xgeom, lineMaterial));
+	averagingOperator.normalizeRows();
 
-        var zgeom = new THREE.Geometry(); 
-        zgeom.vertices.push(new THREE.Vector3(0,0,-size));
-        zgeom.vertices.push(new THREE.Vector3(0,0,size));
-        scene.add( new THREE.Line(zgeom, lineMaterial));
-    }
+	// Construct the solution state vectors
+	simContext.solution = new Array(nFaces);
+	simContext.oldSolution = new Array(nFaces);
 
-    function init() {
+	// Start a couple of bumps for the initial solution. 
+	for(i=0; i<nFaces; ++i) {
+		var fc = faces[i].centroid.clone();
+		var r = 0;
+		r += 2*Math.exp(-simContext.bumpSharpness*fc.distanceToSquared(new THREE.Vector3(1,0,0)));
+		r += 2*Math.exp(-simContext.bumpSharpness*fc.distanceToSquared(new THREE.Vector3(0,1,0)));
+		simContext.solution[i] = r;
+		simContext.oldSolution[i] = r;
+	}
 
-        // three.js
-        camera = new THREE.PerspectiveCamera( 45, window.innerWidth / window.innerHeight, .1, 100 );
-        camera.position = new THREE.Vector3(1.8,1.8,1.8);
-        camera.lookAt(new THREE.Vector3(0,0,0));
+	// Construct a new matrix that will help us to evolve the system over time
+	identity.scale(2.0);
+	laplacian.scale(simContext.timeStepSize * simContext.timeStepSize * simContext.omega);
+	simContext.M = laplacian.add(identity);
+}
 
-        ray = new THREE.Ray( camera.position, null );
-        projector = new THREE.Projector();
-        document.addEventListener( 'mousemove', onDocumentMouseMove, false );
+// return v1*alpha + v2*beta
+function linearVectorCombination(v1, alpha, v2, beta) {
+	var result = new Array(v1.length), i;
+	for(i=0; i<v1.length; ++i) {
+		result[i] = v1[i] * alpha + v2[i] * beta;
+	}
+	return result;
+}
 
-        scene = new THREE.Scene();
+function simUpdate() {
+	// Simple time integration. Later maybe do solver for midpoint method etc.
+	var nextState = simContext.M.multiply(simContext.solution);
+	nextState = linearVectorCombination(nextState, 1, simContext.oldSolution, -1);
+	simContext.oldSolution = simContext.solution;
+	simContext.solution = nextState;
+}
 
-        geometry.computeFaceNormals();
-        geometry.dynamic = true;
+function addAxes() {
+	var size = 2;
+	var lineMaterial = new THREE.LineBasicMaterial({ color: 0x222222 });
 
-        material = new THREE.MeshBasicMaterial({color:0xffffff});
-        material.vertexColors = THREE.FaceColors;
+	var xgeom = new THREE.Geometry(); 
+	xgeom.vertices.push(new THREE.Vector3(-size,0,0));
+	xgeom.vertices.push(new THREE.Vector3(size,0,0));
+	scene.add( new THREE.Line(xgeom, lineMaterial));
 
-        mesh = new THREE.Mesh( geometry, material );
-        mesh.rotation.y = 1;
-        scene.add( mesh );
-        addAxes();
-        renderer = new THREE.WebGLRenderer();
+	var zgeom = new THREE.Geometry(); 
+	zgeom.vertices.push(new THREE.Vector3(0,0,-size));
+	zgeom.vertices.push(new THREE.Vector3(0,0,size));
+	scene.add( new THREE.Line(zgeom, lineMaterial));
+}
 
-        renderer.setSize( window.innerWidth, window.innerHeight );
-        document.body.appendChild( renderer.domElement );
+function init() {
 
-        // Simulation 
-        simContext = {
-            timeStepSize: .5,
-            omega: 1,
-            bumpSharpness: 100,
-            colorScale: 1
-        };
-        buildWaveOperators();
+	// three.js
+	camera = new THREE.PerspectiveCamera( 45, window.innerWidth / window.innerHeight, .1, 100 );
+	camera.position = new THREE.Vector3(2.3,2.3,2.3);
+	camera.lookAt(new THREE.Vector3(0,0,0));
 
-        // GUI
-        var gui = new dat.GUI();
-        gui.add(simContext, 'timeStepSize', 0.01, 1.0).onFinishChange(buildWaveOperators);
-        gui.add(simContext, 'omega', 0.0, 1.0).onFinishChange(buildWaveOperators);
-        gui.add(simContext, 'bumpSharpness', 0.0, 400.0).onFinishChange(buildWaveOperators);
-        gui.add(simContext, 'colorScale', 1.0, 20.0);
+	ray = new THREE.Ray( camera.position, null );
+	projector = new THREE.Projector();
 
-        // stats bar
-        stats = new Stats();
-        stats.domElement.style.position = 'absolute';
-        stats.domElement.style.left = '0px';
-        stats.domElement.style.top = '0px';
-        document.body.appendChild( stats.domElement );
-    }
+	scene = new THREE.Scene();
 
-    function animate() {
-        var time = new Date().getTime() * .001 * .2;
-        camera.position = new THREE.Vector3(Math.cos(time), .5, Math.sin(time)).multiplyScalar(3);
-        camera.lookAt(new THREE.Vector3(0,0,0));
-        camera.updateMatrix();
-        camera.updateProjectionMatrix();
-        ray = new THREE.Ray( camera.position, null );
+	geometry.computeFaceNormals();
+	geometry.dynamic = true;
 
-        stats.begin();
+	material = new THREE.MeshBasicMaterial({color:0xffffff});
+	material.vertexColors = THREE.FaceColors;
 
-        // Update simulation
-        simUpdate();
-        
-        // Fill in the new face colors
-        full = simContext.solution;
-        var col;
-        for(var i=0; i<geometry.faces.length; ++i) {
-            col = full[i];
-            col = col * simContext.colorScale;
-            col = col + .25;
-            if(col<0.0) col = 0.0;
-            if(col>1.0) col = 1.0;
+	mesh = new THREE.Mesh( geometry, material );
+	mesh.rotation.y = 1;
+	scene.add( mesh );
+	addAxes();
+	renderer = new THREE.WebGLRenderer();
 
-            col = (col*255) & 0xff;
-            col = col + (col<<8) + (col<<16);
-            geometry.faces[i].color = new THREE.Color(col);
-        }
-        geometry.colorsNeedUpdate = true;
+	// Trackball controls
+	controls = new THREE.TrackballControls(camera, renderer.domElement);
 
-        renderer.render( scene, camera );
+	renderer.setSize( window.innerWidth, window.innerHeight );
+	document.body.appendChild( renderer.domElement );
 
-        stats.end();
-    }
+	// Simulation 
+	simContext = {
+		timeStepSize: 1,
+		omega: .0002,
+		bumpSharpness: 100,
+		colorScale: 1
+	};
+	buildWaveOperators();
 
-    function onDocumentMouseMove( event ) {
-        event.preventDefault();
+	// stats bar
+	stats = new Stats();
+	stats.domElement.style.position = 'absolute';
+	stats.domElement.style.left = '0px';
+	stats.domElement.style.top = '0px';
+	document.body.appendChild( stats.domElement );
+}
 
-        if(event.which != 1) return;
+function animate() {
+	controls.update();
+	stats.begin();
 
-        mouse2D.x = ( event.clientX / window.innerWidth ) * 2 - 1;
-        mouse2D.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+	// Update simulation
+	simUpdate();
 
-        mouse3D = projector.unprojectVector( mouse2D.clone(), camera );
-        ray.direction = mouse3D.subSelf( camera.position ).normalize();
+	// Fill in the new face colors
+	full = simContext.solution;
+	var col;
+	for(var i=0; i<geometry.faces.length; ++i) {
+		col = full[i];
+		col = col * simContext.colorScale;
+		col = col + .25;
+		if(col<0.0) col = 0.0;
+		if(col>1.0) col = 1.0;
 
-        var intersects = ray.intersectObjects( scene.children ), faceIndex, i;
+		col = (col*255) & 0xff;
+		col = col + (col<<8) + (col<<16);
+		geometry.faces[i].color = new THREE.Color(col);
+	}
+	geometry.colorsNeedUpdate = true;
 
-        if ( intersects.length > 0 ) {
-            faceIndex = intersects[0].faceIndex;
+	renderer.render( scene, camera );
 
-            // We don't want to continuously add to the same face
-            if(faceIndex === lastSelectedFace) {
-                return;
-            }
-
-            if(faceIndex>0) {
-
-                var nFaces = geometry.faces.length;
-                var pulse = new Array(nFaces)
-                for(i=0;i<nFaces;++i) {
-                    pulse[i] = 0.0;
-                }
-                pulse[faceIndex] = 1;
-
-                // Smooth this out a couple of times. (This is stupid and slow, but it works.)
-                for(i=0; i<3; ++i)
-                    pulse = averagingOperator.multiply(pulse);
-
-                simContext.solution = linearVectorCombination(pulse, 1, simContext.solution, 1);
-                simContext.oldSolution = linearVectorCombination(pulse, 1, simContext.oldSolution, 1);
-
-                lastSelectedFace = faceIndex;
-            }
-        }
-    }
+	stats.end();
+}
 
 </script>
 
